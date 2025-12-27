@@ -1,42 +1,19 @@
 #!/bin/bash
-# Reinstall OpenVZ/LXC VPS to Ubuntu 24.04 LTS (Noble) - IPv6 ONLY Version
-# Based on OsMutation by Lloyd@nodeseek.com
+# Reinstall OpenVZ/LXC VPS to Debian Trixie (Testing)
+# Static Network Config for User Provided Details
 
 function print_help(){
     echo -ne "\e[1;32m"
     cat <<- EOF
-		Reinstall VPS to Ubuntu 24.04 LTS (Noble);
-		[Mode] IPv6 ONLY Auto-Configuration
+		Target System: Debian Trixie (Testing) - amd64
+		Network Mode: Static IPv6 (User Provided)
 		[Warning] A fresh system will be installed and all old data will be wiped!
 	EOF
     echo -ne "\e[m"
 }
 
-function read_virt_tech(){
-    # Check for virt-what, install if missing
-    if ! command -v virt-what &> /dev/null; then
-        if command -v apt-get &> /dev/null; then apt-get update && apt-get install -y virt-what; fi
-    fi
-    
-    cttype=$(virt-what | sed -n 1p)
-    if [[ $cttype == "lxc" || $cttype == "openvz" ]]; then
-        [[ $cttype == "lxc" ]] && echo -e '\e[1;33mYour container type: lxc\e[m' || echo -e '\e[1;33mYour container type: openvz\e[m'
-    else
-        # Fallback detection
-        if [ -f /proc/user_beancounters ]; then
-            cttype="openvz"
-        elif grep -q "container=lxc" /proc/1/environ 2>/dev/null; then
-            cttype="lxc"
-        else
-            echo -ne "\e[1;33mUnable to detect container type. Input (lxc/openvz):\e[m"
-            read cttype
-        fi
-    fi
-}
-
 function install_requirement(){
-    # Fix DNS for pure IPv6 environments momentarily to fetch packages
-    # Using NAT64 DNS to access IPv4-only repos if necessary
+    # Fix DNS for pure IPv6 environments momentarily
     echo -e "nameserver 2a00:1098:2c::1\nnameserver 2001:4860:4860::8888" > /etc/resolv.conf
 
     if [ -n "$(command -v apk)" ] ; then
@@ -49,28 +26,34 @@ function install_requirement(){
     fi
 }
 
-function get_ubuntu_noble_template(){
-    echo -e '\e[1;32mFetching Ubuntu 24.04 LTS (Noble) image URL...\e[m'
+function get_debian_trixie_template(){
+    echo -e '\e[1;32mFetching Debian Trixie (Testing) image URL...\e[m'
     server="http://images.linuxcontainers.org"
-    
-    if [ "$(uname -m)" == "aarch64" ] ; then
-        arch="arm64"
-    else
-        arch="amd64"
-    fi
+    arch="amd64" # User specified amd64
 
+    # Search for debian;trixie;amd64;default
     path=$(wget -qO- ${server}/meta/1.0/index-system | \
         grep -v edge | \
-        awk -F';' -v arch="$arch" '($1=="ubuntu" && $2=="noble" && $3==arch && $4=="default") {print $NF}' | \
+        awk -F';' -v arch="$arch" '($1=="debian" && $2=="trixie" && $3==arch && $4=="default") {print $NF}' | \
         tail -n 1)
 
     if [ -z "$path" ]; then
-        echo "Error: Could not find Ubuntu 24.04 image for $arch"
-        exit 1
+        echo "Error: Could not find Debian Trixie image for $arch on linuxcontainers.org"
+        echo "Trying fallback to Debian Bookworm (Stable) if Trixie is missing..."
+        path=$(wget -qO- ${server}/meta/1.0/index-system | \
+            grep -v edge | \
+            awk -F';' -v arch="$arch" '($1=="debian" && $2=="bookworm" && $3==arch && $4=="default") {print $NF}' | \
+            tail -n 1)
+            
+        if [ -z "$path" ]; then
+             echo "Critical Error: Image not found."
+             exit 1
+        fi
+        echo -e "\e[1;33mWarning: Trixie not found, falling back to Bookworm.\e[m"
     fi
 
     download_link="${server}/${path}/rootfs.tar.xz"
-    echo -e "\e[1;36mTarget: Ubuntu 24.04 ($arch)\nURL: $download_link\e[m"
+    echo -e "\e[1;36mTarget Image URL: $download_link\e[m"
 }
 
 function download_rootfs(){
@@ -78,73 +61,67 @@ function download_rootfs(){
     if [ -d "/x/bin" ]; then rm -rf /x/*; fi
 
     echo "Downloading and extracting rootfs..."
+    # Check download first
+    if ! wget -q --spider "$download_link"; then
+        echo "Error: Download link is invalid or unreachable."
+        exit 1
+    fi
+    
     wget -qO- "$download_link" | tar -C /x -xJv
+    
+    if [ ! -f /x/bin/bash ]; then
+        echo "Error: Rootfs extraction failed (bash not found)."
+        exit 1
+    fi
 }
 
-function migrate_configuration(){
-    echo -e '\e[1;32mAuto-detecting IPv6 network configuration...\e[m'
-
-    # 1. Detect Network Interface (IPv6 priority)
-    # Try finding interface from default IPv6 route
-    dev=$(ip -6 route show default | grep default | awk '{print $5}' | head -n 1)
+function apply_static_network(){
+    echo -e '\e[1;32mApplying Static Network Configuration...\e[m'
     
-    # Fallback: Find any interface with a global IPv6 address if no default route found yet
-    if [ -z "$dev" ]; then
-        dev=$(ip -6 addr | grep 'scope global' | awk '{print $NF}' | head -n 1)
-    fi
-    
-    if [ -z "$dev" ]; then
-        echo "Error: Could not detect any IPv6-capable network interface!"
-        exit 1
-    fi
-    echo "IPv6 Interface detected: $dev"
-
-    # 2. Capture IPv6 Details
-    ip6_addr=$(ip -6 addr show dev "$dev" scope global | grep inet6 | awk '{print $2}' | head -n 1)
-    ip6_gw=$(ip -6 route show default | grep default | awk '{print $3}' | head -n 1)
-
-    if [ -z "$ip6_addr" ]; then
-        echo "Error: Could not find a global IPv6 address on interface $dev"
-        exit 1
-    fi
-
-    # 3. Prepare Target Directory
     mkdir -p /x/etc/network
     mkdir -p /x/etc/ssh
 
-    # 4. Migrate User Credentials
+    # === CONFIGURATION FROM USER ===
+    local IFACE="eth0"
+    local IP6="2400:8a20:112:1::63/64"
+    local GW6="2400:8a20:112:1::1"
+    # ===============================
+
+    echo "Interface: $IFACE"
+    echo "IPv6: $IP6"
+    echo "Gateway: $GW6"
+
+    # Migrate Root Password / SSH Keys
     [ -f /x/etc/shadow ] && sed -i '/^root:/d' /x/etc/shadow
     grep '^root:' /etc/shadow >> /x/etc/shadow
     [ -d /root/.ssh ] && cp -a /root/.ssh /x/root/
 
-    # 5. Generate /etc/network/interfaces (IPv6 ONLY)
-    echo "Generating IPv6-only configuration..."
+    # Generate /etc/network/interfaces
     cat > /x/etc/network/interfaces <<- EOF
 auto lo
 iface lo inet loopback
 
-auto $dev
-iface $dev inet6 static
-    address $ip6_addr
+auto $IFACE
+iface $IFACE inet6 static
+    address $IP6
+    gateway $GW6
+    dns-nameservers 2001:4860:4860::8888 2606:4700:4700::1111 2a00:1098:2c::1
 EOF
 
-    if [ -n "$ip6_gw" ]; then
-        echo "    gateway $ip6_gw" >> /x/etc/network/interfaces
-    fi
+    # Set Hostname
+    echo "debian-trixie" > /x/etc/hostname
     
-    # Add IPv6 DNS + NAT64 DNS
-    echo "    dns-nameservers 2001:4860:4860::8888 2606:4700:4700::1111 2a00:1098:2c::1" >> /x/etc/network/interfaces
-
-    # 6. Set Hostname and DNS
-    hostname_val=$(hostname)
-    echo "$hostname_val" > /x/etc/hostname
-    
-    # Resolv.conf with IPv6 Nameservers
+    # Set Resolv.conf
     cat > /x/etc/resolv.conf <<- EOF
 nameserver 2001:4860:4860::8888
 nameserver 2606:4700:4700::1111
 nameserver 2a00:1098:2c::1
 EOF
+
+    # Fix for LXC console login (tty)
+    # Ensure securetty allows standard ttys
+    echo "pts/0" >> /x/etc/securetty
+    echo "pts/1" >> /x/etc/securetty
 }
 
 function chroot_run(){
@@ -158,6 +135,7 @@ function replace_os(){
     mkdir -p /x/oldroot
     mount --bind / /x/oldroot
     
+    # Careful cleanup
     chroot_run 'cd /oldroot; '`
         `'rm -rf $(ls /oldroot | grep -vE "(^dev|^proc|^sys|^run|^x)") ; '`
         `'cd /; '`
@@ -169,26 +147,31 @@ function replace_os(){
 function post_install(){
     export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
     
-    if grep -qiE "debian|ubuntu" /x/etc/issue; then
-        echo "Finalizing Ubuntu configuration..."
-        
-        # Install ifupdown for interfaces support
-        chroot_run "apt-get update"
-        chroot_run "DEBIAN_FRONTEND=noninteractive apt-get install -y ssh ifupdown nano curl wget"
-        
-        # Disable systemd-networkd to rely on /etc/network/interfaces
+    echo "Finalizing Debian configuration..."
+    
+    # Install essential packages
+    # Force install ifupdown to use our interfaces file
+    chroot_run "apt-get update"
+    chroot_run "DEBIAN_FRONTEND=noninteractive apt-get install -y ssh ifupdown curl wget nano"
+    
+    # Debian specific network cleanup
+    # Disable systemd-networkd if present to prefer /etc/network/interfaces
+    if [ -f /x/lib/systemd/system/systemd-networkd.service ]; then
         chroot_run "systemctl disable systemd-networkd.service"
-        chroot_run "systemctl unmask networking"
-        chroot_run "systemctl enable networking"
-        
-        sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /x/etc/ssh/sshd_config
-        touch /x/etc/fstab
     fi
+    chroot_run "systemctl unmask networking"
+    chroot_run "systemctl enable networking"
+    
+    # SSH Config
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /x/etc/ssh/sshd_config
+    
+    # Fstab
+    echo "rootfs / auto defaults 0 1" > /x/etc/fstab
 
     rm -rf /x
     sync
     
-    echo -e "\e[1;32mInstallation Complete! IPv6-Only Network Configured.\e[m"
+    echo -e "\e[1;32mInstallation Complete. System ready.\e[m"
     echo -ne "\e[1;33mReboot now? (yes/no):\e[m"
     read reboot_ans < /dev/tty
 
@@ -206,16 +189,9 @@ function main(){
     fi
 
     install_requirement
-    read_virt_tech
-
-    if [ "$cttype" == 'kvm' ]; then
-        echo "Error: This script supports LXC/OpenVZ only."
-        exit 1
-    fi
-
-    get_ubuntu_noble_template
+    get_debian_trixie_template
     download_rootfs
-    migrate_configuration
+    apply_static_network
     replace_os
     post_install
 }

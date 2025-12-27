@@ -1,11 +1,12 @@
 #!/bin/bash
-# Reinstall OpenVZ/LXC VPS to Debian Trixie (Testing)
+# Reinstall OpenVZ/LXC VPS to Debian Trixie (Testing) - GitHub Source
 # Static Network Config for User Provided Details
 
 function print_help(){
     echo -ne "\e[1;32m"
     cat <<- EOF
 		Target System: Debian Trixie (Testing) - amd64
+		Source: GitHub (LXC-202512222216)
 		Network Mode: Static IPv6 (User Provided)
 		[Warning] A fresh system will be installed and all old data will be wiped!
 	EOF
@@ -27,32 +28,9 @@ function install_requirement(){
 }
 
 function get_debian_trixie_template(){
-    echo -e '\e[1;32mFetching Debian Trixie (Testing) image URL...\e[m'
-    server="http://images.linuxcontainers.org"
-    arch="amd64" # User specified amd64
-
-    # Search for debian;trixie;amd64;default
-    path=$(wget -qO- ${server}/meta/1.0/index-system | \
-        grep -v edge | \
-        awk -F';' -v arch="$arch" '($1=="debian" && $2=="trixie" && $3==arch && $4=="default") {print $NF}' | \
-        tail -n 1)
-
-    if [ -z "$path" ]; then
-        echo "Error: Could not find Debian Trixie image for $arch on linuxcontainers.org"
-        echo "Trying fallback to Debian Bookworm (Stable) if Trixie is missing..."
-        path=$(wget -qO- ${server}/meta/1.0/index-system | \
-            grep -v edge | \
-            awk -F';' -v arch="$arch" '($1=="debian" && $2=="bookworm" && $3==arch && $4=="default") {print $NF}' | \
-            tail -n 1)
-            
-        if [ -z "$path" ]; then
-             echo "Critical Error: Image not found."
-             exit 1
-        fi
-        echo -e "\e[1;33mWarning: Trixie not found, falling back to Bookworm.\e[m"
-    fi
-
-    download_link="${server}/${path}/rootfs.tar.xz"
+    # Using User Provided GitHub Link
+    download_link="https://github.com/LloydAsp/OsMutation/releases/download/LXC-202512222216/debian-trixie-amd64.tar.xz"
+    
     echo -e "\e[1;36mTarget Image URL: $download_link\e[m"
 }
 
@@ -61,16 +39,18 @@ function download_rootfs(){
     if [ -d "/x/bin" ]; then rm -rf /x/*; fi
 
     echo "Downloading and extracting rootfs..."
-    # Check download first
-    if ! wget -q --spider "$download_link"; then
-        echo "Error: Download link is invalid or unreachable."
+    # Check download first (using -I HEAD for speed check if supported, else standard spider)
+    if ! wget --spider -q "$download_link"; then
+        echo "Error: The provided GitHub download link is unreachable."
         exit 1
     fi
     
+    # Download and extract
     wget -qO- "$download_link" | tar -C /x -xJv
     
+    # Verify extraction
     if [ ! -f /x/bin/bash ]; then
-        echo "Error: Rootfs extraction failed (bash not found)."
+        echo "Error: Rootfs extraction failed (bash not found). Download might be corrupt."
         exit 1
     fi
 }
